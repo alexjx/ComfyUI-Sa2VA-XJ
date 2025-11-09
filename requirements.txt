@@ -1,0 +1,9 @@
+transformers>=4.57.0
+torch>=2.0.0
+qwen_vl_utils
+pillow
+numpy
+
+# Optional dependencies (install separately if needed):
+# bitsandbytes - for 8-bit quantization
+# flash-attn - for flash attention acceleration
