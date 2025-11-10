@@ -9,6 +9,7 @@ Sa2VA (Segment Anything 2 Video Assistant) is a multimodal large language model 
 ## Features
 
 - ✅ **Two dedicated nodes**: Separate nodes for image and video processing
+- ✅ **Configurable mask threshold**: Control mask quality with raw sigmoid probabilities (0.0-1.0, step 0.05)
 - ✅ **8-bit quantization**: Save VRAM with proper vision component handling
 - ✅ **Flash attention**: Optional acceleration for faster inference
 - ✅ **Model unloading**: Free VRAM after inference (user-controllable)
@@ -66,10 +67,10 @@ Process single images with Sa2VA.
 - `model_name`: Model to use (default: Qwen3-VL-4B)
 - `image`: Input image (IMAGE type)
 - `segmentation_prompt`: Description of what to segment (STRING)
-- `mask_threshold`: Binary threshold for masks (FLOAT, 0.0-1.0, step 0.1)
-- `use_8bit_quantization`: Enable 8-bit quantization (BOOLEAN)
-- `use_flash_attn`: Enable flash attention (BOOLEAN)
-- `unload_model`: Unload model after inference (BOOLEAN, default: True)
+- `threshold`: Binary threshold for masks (FLOAT, 0.0-1.0, step 0.05, default: 0.5)
+- `use_8bit`: Enable 8-bit quantization (BOOLEAN, default: False)
+- `use_flash_attn`: Enable flash attention (BOOLEAN, default: True)
+- `unload`: Unload model after inference (BOOLEAN, default: True)
 
 **Outputs:**
 - `text_output`: Generated text description (STRING)
@@ -90,10 +91,10 @@ Process video frames or image batches with Sa2VA.
 - `model_name`: Model to use (default: Qwen3-VL-4B)
 - `images`: Input frames (IMAGE type, batch)
 - `segmentation_prompt`: Description of what to segment (STRING)
-- `mask_threshold`: Binary threshold for masks (FLOAT, 0.0-1.0, step 0.1)
-- `use_8bit_quantization`: Enable 8-bit quantization (BOOLEAN)
-- `use_flash_attn`: Enable flash attention (BOOLEAN)
-- `unload_model`: Unload model after inference (BOOLEAN, default: True)
+- `threshold`: Binary threshold for masks (FLOAT, 0.0-1.0, step 0.05, default: 0.7)
+- `use_8bit`: Enable 8-bit quantization (BOOLEAN, default: False)
+- `use_flash_attn`: Enable flash attention (BOOLEAN, default: True)
+- `unload`: Unload model after inference (BOOLEAN, default: True)
 
 **Outputs:**
 - `text_output`: Generated video description (STRING)
@@ -122,20 +123,23 @@ Process video frames or image batches with Sa2VA.
 ## Usage Tips
 
 ### Save VRAM
-1. Enable **8-bit quantization** (saves ~40% VRAM)
+1. Enable **use_8bit** (saves ~40% VRAM)
 2. Use **smaller models** (2B-4B)
-3. Keep **unload_model = True** (default)
-4. Disable **flash_attn** if not installed
+3. Keep **unload = True** (default)
+4. Disable **use_flash_attn** if not installed
 
 ### Improve Quality
 1. Use **specific prompts**: "woman on the right" vs "person"
 2. Use **descriptive text**: Sa2VA handles long prompts well
-3. Adjust **mask_threshold**: Higher = stricter masks (0.6-0.7)
+3. Adjust **threshold**:
+   - Lower (0.3-0.4): More inclusive masks, captures low-confidence regions
+   - Default (0.5): Balanced segmentation
+   - Higher (0.6-0.7): Stricter masks, only high-confidence regions
 4. Use **larger models**: 7B-14B for complex scenes
 
 ### Speed Up Inference
-1. Enable **flash_attn** (requires flash-attn package)
-2. Use **8-bit quantization** (slight quality trade-off)
+1. Enable **use_flash_attn** (requires flash-attn package)
+2. Enable **use_8bit** (slight quality trade-off)
 3. Use **smaller models** (2B-4B)
 
 ## Troubleshooting
@@ -155,23 +159,23 @@ pip install qwen_vl_utils
 ```bash
 pip install bitsandbytes
 ```
-Or disable 8-bit quantization in node settings.
+Or disable `use_8bit` in node settings.
 
 ### "Flash attention not available"
 ```bash
 pip install flash-attn --no-build-isolation
 ```
-Or disable flash attention in node settings (not required).
+Or disable `use_flash_attn` in node settings (not required).
 
 ### "CUDA Out of Memory"
-1. Enable 8-bit quantization
+1. Enable `use_8bit`
 2. Use smaller model (2B or 4B)
-3. Ensure unload_model = True
+3. Ensure `unload = True` (default)
 4. Close other programs using VRAM
 
 ### "No masks generated" (all black masks)
 1. Try more specific prompts
-2. Adjust mask_threshold (try 0.3-0.7)
+2. Adjust `threshold` (try 0.3-0.7 in 0.05 steps)
 3. Check if objects are actually in the image
 4. Try different model variant
 
@@ -194,10 +198,20 @@ Or disable flash attention in node settings (not required).
 
 ### Multi-object Segmentation
 1. Use specific prompt: "Segment the red car and the person standing"
-2. Adjust mask_threshold to 0.5-0.6
+2. Adjust `threshold` to 0.5-0.6 for balanced results
 3. Multiple masks will be output as batch
 
 ## Technical Details
+
+### Mask Threshold Control
+
+This implementation includes a **monkey-patched model** that returns raw sigmoid probabilities instead of binarized masks. This makes the `threshold` parameter fully functional:
+
+- **Raw probabilities**: The model outputs continuous confidence values (0.0-1.0)
+- **User control**: Your `threshold` parameter determines the binarization point
+- **Fine-grained adjustment**: 0.05 step size allows precise control over mask quality
+
+See `MASK_THRESHOLD_IMPLEMENTATION.md` for technical details on the implementation.
 
 ### Cache Location
 Models are cached in the global HuggingFace cache:
@@ -214,7 +228,7 @@ Skips vision components to avoid errors:
 Language model backbone is quantized (~70% of parameters).
 
 ### Model Unloading
-When `unload_model = True`:
+When `unload = True` (default):
 - Model is deleted from memory
 - CUDA cache is cleared
 - Garbage collection is forced

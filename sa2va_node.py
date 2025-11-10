@@ -3,20 +3,25 @@ Sa2VA Nodes for ComfyUI - Refined Edition
 Simple, clean implementation of Sa2VA segmentation nodes
 """
 
-import torch
-import numpy as np
-from PIL import Image
 import gc
+from types import MethodType
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
 
 # Check optional dependencies at module level
 try:
     import bitsandbytes
+
     HAS_BITSANDBYTES = True
 except ImportError:
     HAS_BITSANDBYTES = False
 
 try:
     import flash_attn
+
     HAS_FLASH_ATTN = True
 except ImportError:
     HAS_FLASH_ATTN = False
@@ -26,6 +31,7 @@ def check_transformers_version():
     """Check if transformers version is sufficient for Sa2VA models."""
     try:
         from transformers import __version__ as transformers_version
+
         version_parts = transformers_version.split(".")
         major, minor = int(version_parts[0]), int(version_parts[1])
 
@@ -42,7 +48,208 @@ def check_transformers_version():
 check_transformers_version()
 
 # Import after version check
-from transformers import AutoProcessor, AutoModel, BitsAndBytesConfig
+from transformers import AutoModel, AutoProcessor, BitsAndBytesConfig
+
+
+def get_seg_hidden_states(hidden_states, output_ids, seg_id):
+    """Extract hidden states for [SEG] tokens."""
+    seg_mask = output_ids == seg_id
+    n_out = len(seg_mask)
+    if n_out == 0:
+        return hidden_states[0:0]
+    return hidden_states[-n_out:][seg_mask]
+
+
+def predict_forward_with_raw_masks(
+    self,
+    image=None,
+    video=None,
+    text=None,
+    past_text="",
+    mask_prompts=None,
+    tokenizer=None,
+    processor=None,
+    return_raw_masks=False,  # NEW PARAMETER
+):
+    """
+    Modified predict_forward that can return raw sigmoid probabilities.
+
+    This is a monkey-patched version of the original HuggingFace model's
+    predict_forward method. The key difference is the addition of the
+    'return_raw_masks' parameter which, when True, returns raw sigmoid
+    probabilities instead of binarized masks.
+
+    Args:
+        return_raw_masks: If True, return raw sigmoid probabilities (0-1)
+                         If False, apply > 0.5 threshold (original behavior)
+    """
+    # Call the original method implementation
+    assert processor is not None
+    self.processor = processor
+    self.seg_token_idx = self.processor.tokenizer.convert_tokens_to_ids("[SEG]")
+    text = text.replace("<image>", "")
+
+    if image is None and video is None and "<image>" not in past_text:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": past_text + text},
+                ],
+            }
+        ]
+        processsed_text = self.processor.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        mm_inputs = self.processor(
+            text=[processsed_text],
+            images=None,
+            videos=None,
+            padding=True,
+            return_tensors="pt",
+        )
+        mm_inputs = mm_inputs.to(self.device)
+        ret_masks = []
+    else:
+        input_dict = {}
+        if video is not None:
+            from qwen_vl_utils import process_vision_info
+
+            extra_pixel_values = []
+            content = []
+            ori_image_size = video[0].size
+            for frame_idx, frame_image in enumerate(video):
+                g_image = np.array(frame_image)
+                g_image = self.extra_image_processor.apply_image(g_image)
+                g_image = torch.from_numpy(g_image).permute(2, 0, 1).contiguous()
+                extra_pixel_values.append(g_image)
+                if frame_idx < 5:
+                    content.append({"type": "image", "image": frame_image})
+
+            content.append({"type": "text", "text": text})
+            messages = [{"role": "user", "content": content}]
+
+            processsed_text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            mm_inputs = self.processor(
+                text=[processsed_text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+                min_pixels=self.min_pixels,
+                max_pixels=self.max_pixels,
+            )
+            mm_inputs = mm_inputs.to(self.device)
+            g_pixel_values = torch.stack(
+                [
+                    self.grounding_encoder.preprocess_image(pixel)
+                    for pixel in extra_pixel_values
+                ]
+            ).to(self.torch_dtype)
+            num_frames = min(5, len(video))
+        else:
+            from qwen_vl_utils import process_vision_info
+
+            ori_image_size = image.size
+            g_image = np.array(image)
+            g_image = self.extra_image_processor.apply_image(g_image)
+            g_pixel_values = (
+                torch.from_numpy(g_image)
+                .permute(2, 0, 1)
+                .contiguous()
+                .to(self.torch_dtype)
+            )
+            extra_pixel_values = [g_pixel_values]
+            g_pixel_values = torch.stack(
+                [
+                    self.grounding_encoder.preprocess_image(pixel)
+                    for pixel in extra_pixel_values
+                ]
+            ).to(self.torch_dtype)
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": text},
+                    ],
+                }
+            ]
+            processsed_text = self.processor.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            image_inputs, video_inputs = process_vision_info(messages)
+            mm_inputs = self.processor(
+                text=[processsed_text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+                min_pixels=self.min_pixels,
+                max_pixels=self.max_pixels,
+            )
+            mm_inputs = mm_inputs.to(self.device)
+            num_frames = 1
+
+        input_dict["g_pixel_values"] = g_pixel_values
+        ret_masks = []
+
+    generate_output = self.model.generate(
+        **mm_inputs,
+        max_new_tokens=2048,
+        do_sample=False,
+        output_hidden_states=True,
+        return_dict_in_generate=True,
+    )
+
+    generate_output_trimmed = [
+        out_ids[len(in_ids) :]
+        for in_ids, out_ids in zip(mm_inputs.input_ids, generate_output.sequences)
+    ]
+    predict = self.processor.batch_decode(
+        generate_output_trimmed, skip_special_tokens=False
+    )[0].strip()
+
+    if image is None and video is None and "<image>" not in past_text:
+        return {"prediction": predict, "prediction_masks": ret_masks}
+
+    # Extract segmentation masks
+    hidden_states = generate_output.hidden_states
+    last_hidden_states = [item[-1][0] for item in hidden_states]
+    last_hidden_states = torch.cat(last_hidden_states, dim=0)
+    seg_hidden_states = get_seg_hidden_states(
+        last_hidden_states, generate_output.sequences[0][:-1], seg_id=self.seg_token_idx
+    )
+    all_seg_hidden_states = self.text_hidden_fcs(seg_hidden_states)
+
+    for seg_hidden_states in all_seg_hidden_states:
+        seg_hidden_states = seg_hidden_states.unsqueeze(0)
+        g_pixel_values = input_dict["g_pixel_values"]
+        sam_states = self.grounding_encoder.get_sam2_embeddings(g_pixel_values)
+        pred_masks = self.grounding_encoder.language_embd_inference(
+            sam_states, [seg_hidden_states] * num_frames
+        )
+        w, h = ori_image_size
+        masks = F.interpolate(
+            pred_masks, size=(h, w), mode="bilinear", align_corners=False
+        )
+        masks = masks[:, 0]
+        masks = masks.sigmoid()  # Apply sigmoid to get probabilities
+
+        # THIS IS THE KEY MODIFICATION:
+        if not return_raw_masks:
+            # Original behavior: binarize with hardcoded 0.5
+            masks = masks > 0.5
+        # else: return raw sigmoid probabilities (0-1 float values)
+
+        masks = masks.cpu().numpy()
+        ret_masks.append(masks)
+
+    return {"prediction": predict, "prediction_masks": ret_masks}
 
 
 class Sa2VABase:
@@ -91,9 +298,9 @@ class Sa2VABase:
             quantization_config = BitsAndBytesConfig(
                 load_in_8bit=True,
                 llm_int8_skip_modules=[
-                    "visual",            # Vision encoder (4D conv layers)
-                    "grounding_encoder", # SAM2 grounding model
-                    "text_hidden_fcs",   # Vision-to-text projection
+                    "visual",  # Vision encoder (4D conv layers)
+                    "grounding_encoder",  # SAM2 grounding model
+                    "text_hidden_fcs",  # Vision-to-text projection
                 ],
                 llm_int8_threshold=6.0,
                 llm_int8_enable_fp32_cpu_offload=True,
@@ -103,7 +310,10 @@ class Sa2VABase:
         else:
             # Use bfloat16 if supported, else float16
             if torch.cuda.is_available():
-                if hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+                if (
+                    hasattr(torch.cuda, "is_bf16_supported")
+                    and torch.cuda.is_bf16_supported()
+                ):
                     dtype = torch.bfloat16
                 else:
                     dtype = torch.float16
@@ -137,6 +347,13 @@ class Sa2VABase:
             )
 
             self.current_model = model_name
+
+            # Monkey-patch the model's predict_forward method to support raw masks
+            print("  Patching model to support configurable mask threshold...")
+            self.model.predict_forward = MethodType(
+                predict_forward_with_raw_masks, self.model
+            )
+
             print(f"✓ Model loaded successfully")
 
         except Exception as e:
@@ -193,7 +410,10 @@ class Sa2VABase:
 
         # Handle channel-first format (C, H, W) -> (H, W, C)
         if len(image_np.shape) == 3 and image_np.shape[0] in [1, 3, 4]:
-            if image_np.shape[0] < image_np.shape[1] and image_np.shape[0] < image_np.shape[2]:
+            if (
+                image_np.shape[0] < image_np.shape[1]
+                and image_np.shape[0] < image_np.shape[2]
+            ):
                 image_np = np.transpose(image_np, (1, 2, 0))
 
         # Handle alpha channel
@@ -253,7 +473,10 @@ class Sa2VABase:
                         mask_np = mask_np[0]
                     elif mask_np.shape[2] == 1:  # (H, W, 1)
                         mask_np = mask_np[:, :, 0]
-                    elif mask_np.shape[0] < mask_np.shape[1] and mask_np.shape[0] < mask_np.shape[2]:
+                    elif (
+                        mask_np.shape[0] < mask_np.shape[1]
+                        and mask_np.shape[0] < mask_np.shape[2]
+                    ):
                         mask_np = mask_np[0]
                     else:
                         mask_np = mask_np[:, :, 0]
@@ -272,14 +495,20 @@ class Sa2VABase:
                 if np.any(np.isnan(mask_np)) or np.any(np.isinf(mask_np)):
                     mask_np = np.nan_to_num(mask_np, nan=0.0, posinf=1.0, neginf=0.0)
 
-                # Normalize to 0-1
+                # Normalize to 0-1 (this now actually matters for raw sigmoid values!)
+                # Raw sigmoid values are already in 0-1 range, but we ensure it here
                 mask_min, mask_max = mask_np.min(), mask_np.max()
                 if mask_max > mask_min:
                     mask_np = (mask_np - mask_min) / (mask_max - mask_min)
                 else:
-                    mask_np = np.ones_like(mask_np) if mask_min > 0 else np.zeros_like(mask_np)
+                    mask_np = (
+                        np.ones_like(mask_np)
+                        if mask_min > 0
+                        else np.zeros_like(mask_np)
+                    )
 
-                # Apply threshold
+                # Apply user-configurable threshold (NOW THIS IS ACTUALLY USEFUL!)
+                # Raw masks are sigmoid probabilities (0-1), so threshold controls binarization
                 mask_np = (mask_np > threshold).astype(np.float32)
 
                 # Convert to ComfyUI MASK format
@@ -340,18 +569,18 @@ class XJSa2VAImageSegmentation(Sa2VABase):
                         "multiline": True,
                     },
                 ),
-                "mask_threshold": (
+                "threshold": (
                     "FLOAT",
                     {
                         "default": 0.5,
                         "min": 0.0,
                         "max": 1.0,
-                        "step": 0.1,
+                        "step": 0.05,
                     },
                 ),
-                "use_8bit_quantization": ("BOOLEAN", {"default": False}),
+                "use_8bit": ("BOOLEAN", {"default": False}),
                 "use_flash_attn": ("BOOLEAN", {"default": True}),
-                "unload_model": ("BOOLEAN", {"default": True}),
+                "unload": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -365,10 +594,10 @@ class XJSa2VAImageSegmentation(Sa2VABase):
         model_name,
         image,
         segmentation_prompt,
-        mask_threshold,
-        use_8bit_quantization,
+        threshold,
+        use_8bit,
         use_flash_attn,
-        unload_model,
+        unload,
     ):
         """Process single image with Sa2VA.
 
@@ -376,10 +605,10 @@ class XJSa2VAImageSegmentation(Sa2VABase):
             model_name: HuggingFace model identifier
             image: ComfyUI IMAGE tensor [B, H, W, C] or [H, W, C]
             segmentation_prompt: Text prompt for segmentation
-            mask_threshold: Threshold for binary masks
-            use_8bit_quantization: Use 8-bit quantization
+            threshold: Threshold for binary masks
+            use_8bit: Use 8-bit quantization
             use_flash_attn: Use flash attention
-            unload_model: Unload model after inference
+            unload: Unload model after inference
 
         Returns:
             Tuple of (text_output, masks)
@@ -388,7 +617,7 @@ class XJSa2VAImageSegmentation(Sa2VABase):
             raise ValueError("No image provided")
 
         # Load model
-        self.load_model(model_name, use_8bit_quantization, use_flash_attn)
+        self.load_model(model_name, use_8bit, use_flash_attn)
 
         # Convert to PIL
         pil_image = self._tensor_to_pil(image)
@@ -400,6 +629,7 @@ class XJSa2VAImageSegmentation(Sa2VABase):
             "past_text": "",
             "mask_prompts": None,
             "processor": self.processor,
+            "return_raw_masks": True,  # Get raw sigmoid probabilities
         }
 
         # Inference
@@ -418,12 +648,10 @@ class XJSa2VAImageSegmentation(Sa2VABase):
 
         # Convert masks
         h, w = pil_image.size[1], pil_image.size[0]
-        comfyui_masks, _ = self._convert_masks_to_comfyui(
-            masks, h, w, mask_threshold
-        )
+        comfyui_masks, _ = self._convert_masks_to_comfyui(masks, h, w, threshold)
 
         # Unload if requested
-        if unload_model:
+        if unload:
             self._unload_model()
 
         return (text, comfyui_masks)
@@ -455,18 +683,18 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
                         "multiline": True,
                     },
                 ),
-                "mask_threshold": (
+                "threshold": (
                     "FLOAT",
                     {
-                        "default": 0.5,
+                        "default": 0.7,
                         "min": 0.0,
                         "max": 1.0,
-                        "step": 0.1,
+                        "step": 0.05,
                     },
                 ),
-                "use_8bit_quantization": ("BOOLEAN", {"default": False}),
+                "use_8bit": ("BOOLEAN", {"default": False}),
                 "use_flash_attn": ("BOOLEAN", {"default": True}),
-                "unload_model": ("BOOLEAN", {"default": True}),
+                "unload": ("BOOLEAN", {"default": True}),
             }
         }
 
@@ -480,10 +708,10 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
         model_name,
         images,
         segmentation_prompt,
-        mask_threshold,
-        use_8bit_quantization,
+        threshold,
+        use_8bit,
         use_flash_attn,
-        unload_model,
+        unload,
     ):
         """Process video frames with Sa2VA.
 
@@ -491,10 +719,10 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
             model_name: HuggingFace model identifier
             images: ComfyUI IMAGE tensor [B, H, W, C] where B is number of frames
             segmentation_prompt: Text prompt for segmentation
-            mask_threshold: Threshold for binary masks
-            use_8bit_quantization: Use 8-bit quantization
+            threshold: Threshold for binary masks
+            use_8bit: Use 8-bit quantization
             use_flash_attn: Use flash attention
-            unload_model: Unload model after inference
+            unload: Unload model after inference
 
         Returns:
             Tuple of (text_output, masks)
@@ -503,7 +731,7 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
             raise ValueError("No images provided")
 
         # Load model
-        self.load_model(model_name, use_8bit_quantization, use_flash_attn)
+        self.load_model(model_name, use_8bit, use_flash_attn)
 
         # Convert batch to list of PIL images
         pil_frames = []
@@ -521,6 +749,7 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
             "past_text": "",
             "mask_prompts": None,
             "processor": self.processor,
+            "return_raw_masks": True,  # Get raw sigmoid probabilities
         }
 
         # Inference
@@ -538,12 +767,10 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
 
         # Convert masks
         h, w = images.shape[1], images.shape[2]
-        comfyui_masks, _ = self._convert_masks_to_comfyui(
-            masks, h, w, mask_threshold
-        )
+        comfyui_masks, _ = self._convert_masks_to_comfyui(masks, h, w, threshold)
 
         # Unload if requested
-        if unload_model:
+        if unload:
             self._unload_model()
 
         return (text, comfyui_masks)
