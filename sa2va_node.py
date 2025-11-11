@@ -26,6 +26,15 @@ try:
 except ImportError:
     HAS_FLASH_ATTN = False
 
+# Check for OpenCV
+try:
+    HAS_CV2 = True
+    import cv2
+except ImportError:
+    HAS_CV2 = False
+
+from qwen_vl_utils import process_vision_info
+
 
 def check_transformers_version():
     """Check if transformers version is sufficient for Sa2VA models."""
@@ -113,8 +122,6 @@ def predict_forward_with_raw_masks(
     else:
         input_dict = {}
         if video is not None:
-            from qwen_vl_utils import process_vision_info
-
             extra_pixel_values = []
             content = []
             ori_image_size = video[0].size
@@ -151,8 +158,6 @@ def predict_forward_with_raw_masks(
             ).to(self.torch_dtype)
             num_frames = min(5, len(video))
         else:
-            from qwen_vl_utils import process_vision_info
-
             ori_image_size = image.size
             g_image = np.array(image)
             g_image = self.extra_image_processor.apply_image(g_image)
@@ -431,7 +436,81 @@ class Sa2VABase:
 
         return pil_image
 
-    def _convert_masks_to_comfyui(self, masks, height, width, threshold):
+    def _apply_morphological_operation(
+        self, mask_np, operation="none", erode_kernel=1, dilate_kernel=1, iterations=1
+    ):
+        """Apply morphological operations with separate kernel sizes.
+
+        Args:
+            mask_np: 2D numpy array (0-1 range)
+            operation: 'none', 'opening', or 'closing'
+            erode_kernel: Size of erosion kernel (1-50)
+            dilate_kernel: Size of dilation kernel (1-50)
+            iterations: Number of iterations (1-10)
+
+        Returns:
+            Processed mask as numpy array
+        """
+        if not HAS_CV2 or operation == "none":
+            return mask_np
+
+        try:
+            # Convert to uint8 for OpenCV
+            mask_uint8 = (mask_np * 255).astype(np.uint8)
+
+            # Create kernels
+            erode_kernel_size = max(1, erode_kernel | 1)  # Make odd
+            dilate_kernel_size = max(1, dilate_kernel | 1)  # Make odd
+
+            erode_k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (erode_kernel_size, erode_kernel_size)
+            )
+            dilate_k = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (dilate_kernel_size, dilate_kernel_size)
+            )
+
+            result = mask_uint8.copy()
+
+            if operation == "opening":
+                # Opening: Erode then Dilate (removes noise)
+                # Apply complete opening sequence for each iteration
+                for _ in range(iterations):
+                    result = cv2.erode(result, erode_k, iterations=1)
+                    result = cv2.dilate(result, dilate_k, iterations=1)
+
+            elif operation == "closing":
+                # Closing: Dilate then Erode (fills holes)
+                # Apply complete closing sequence for each iteration
+                for _ in range(iterations):
+                    result = cv2.dilate(result, dilate_k, iterations=1)
+                    result = cv2.erode(result, erode_k, iterations=1)
+
+            elif operation == "erode":
+                # Erode only (shrink mask)
+                result = cv2.erode(result, erode_k, iterations=iterations)
+
+            elif operation == "dilate":
+                # Dilate only (expand mask)
+                result = cv2.dilate(result, dilate_k, iterations=iterations)
+
+            # Convert back to float 0-1 range
+            return result.astype(np.float32) / 255.0
+
+        except Exception as e:
+            print(f"Warning: Error applying morphological operation: {e}")
+            return mask_np
+
+    def _convert_masks_to_comfyui(
+        self,
+        masks,
+        height,
+        width,
+        threshold,
+        morph="none",
+        erode_kernel=1,
+        dilate_kernel=1,
+        iterations=1,
+    ):
         """Convert Sa2VA masks to ComfyUI MASK and IMAGE formats.
 
         Args:
@@ -507,6 +586,16 @@ class Sa2VABase:
                         else np.zeros_like(mask_np)
                     )
 
+                # Apply morphological operation before threshold
+                if morph != "none":
+                    mask_np = self._apply_morphological_operation(
+                        mask_np,
+                        morph,
+                        erode_kernel,
+                        dilate_kernel,
+                        iterations,
+                    )
+
                 # Apply user-configurable threshold (NOW THIS IS ACTUALLY USEFUL!)
                 # Raw masks are sigmoid probabilities (0-1), so threshold controls binarization
                 mask_np = (mask_np > threshold).astype(np.float32)
@@ -561,12 +650,16 @@ class XJSa2VAImageSegmentation(Sa2VABase):
                     ],
                     {"default": "ByteDance/Sa2VA-Qwen3-VL-4B"},
                 ),
-                "image": ("IMAGE",),
+                "image": (
+                    "IMAGE",
+                    {"tooltip": "Input image to segment. Should be in RGB format."},
+                ),
                 "segmentation_prompt": (
                     "STRING",
                     {
                         "default": "Please provide segmentation masks for all objects.",
                         "multiline": True,
+                        "tooltip": "Text prompt describing what objects to segment in the image. Be specific for better results.",
                     },
                 ),
                 "threshold": (
@@ -576,18 +669,86 @@ class XJSa2VAImageSegmentation(Sa2VABase):
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
+                        "tooltip": "Threshold for converting probability masks to binary masks. Higher values create stricter masks.",
                     },
                 ),
-                "use_8bit": ("BOOLEAN", {"default": False}),
-                "use_flash_attn": ("BOOLEAN", {"default": True}),
-                "unload": ("BOOLEAN", {"default": True}),
+                "use_8bit": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Use 8-bit quantization to reduce memory usage (requires bitsandbytes).",
+                    },
+                ),
+                "use_flash_attn": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Use flash attention for faster processing (requires flash-attn).",
+                    },
+                ),
+                "unload": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Unload model from memory after processing to free VRAM.",
+                    },
+                ),
+                "morph": (
+                    ["none", "opening", "closing", "erode", "dilate"],
+                    {
+                        "default": "none",
+                        "tooltip": "Morphological operation:\n"
+                        "• Opening: Erode then Dilate (removes noise)\n"
+                        "• Closing: Dilate then Erode (fills holes)\n"
+                        "• Erode: Shrink mask edges\n"
+                        "• Dilate: Expand mask edges\n"
+                        "• None: No operation",
+                    },
+                ),
+                "erode_kernel": (
+                    "INT",
+                    {
+                        "default": 3,
+                        "min": 1,
+                        "max": 50,
+                        "step": 2,
+                        "tooltip": "Size of erosion kernel (odd numbers: 1, 3, 5...). "
+                        "Used in both opening and closing operations.",
+                    },
+                ),
+                "dilate_kernel": (
+                    "INT",
+                    {
+                        "default": 3,
+                        "min": 1,
+                        "max": 50,
+                        "step": 2,
+                        "tooltip": "Size of dilation kernel (odd numbers: 1, 3, 5...). "
+                        "Used in both opening and closing operations.",
+                    },
+                ),
+                "iterations": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 10,
+                        "step": 1,
+                        "tooltip": "Number of iterations. Higher values create stronger effects.",
+                    },
+                ),
             }
         }
 
     RETURN_TYPES = ("STRING", "MASK")
     RETURN_NAMES = ("text_output", "masks")
+    OUTPUT_TOOLTIPS = ("Text output from the model", "Generated segmentation masks")
     FUNCTION = "segment_image"
     CATEGORY = "Sa2VA"
+    DESCRIPTION = (
+        "Sa2VA (Segment Anything 2 with Vision Assistant) provides high-quality image segmentation using text prompts. "
+        "This node generates precise masks for objects described in your text prompt, with optional morphological refinement for cleaner results."
+    )
 
     def segment_image(
         self,
@@ -598,6 +759,10 @@ class XJSa2VAImageSegmentation(Sa2VABase):
         use_8bit,
         use_flash_attn,
         unload,
+        morph="none",
+        erode_kernel=3,
+        dilate_kernel=3,
+        iterations=1,
     ):
         """Process single image with Sa2VA.
 
@@ -609,6 +774,10 @@ class XJSa2VAImageSegmentation(Sa2VABase):
             use_8bit: Use 8-bit quantization
             use_flash_attn: Use flash attention
             unload: Unload model after inference
+            morph: Morphological operation ("none", "opening", "closing", "erode", "dilate")
+            erode_kernel: Size of erosion kernel (1-50, odd numbers)
+            dilate_kernel: Size of dilation kernel (1-50, odd numbers)
+            iterations: Number of iterations (1-10)
 
         Returns:
             Tuple of (text_output, masks)
@@ -648,7 +817,16 @@ class XJSa2VAImageSegmentation(Sa2VABase):
 
         # Convert masks
         h, w = pil_image.size[1], pil_image.size[0]
-        comfyui_masks, _ = self._convert_masks_to_comfyui(masks, h, w, threshold)
+        comfyui_masks, _ = self._convert_masks_to_comfyui(
+            masks,
+            h,
+            w,
+            threshold,
+            morph,
+            erode_kernel,
+            dilate_kernel,
+            iterations,
+        )
 
         # Unload if requested
         if unload:
@@ -675,12 +853,19 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
                     ],
                     {"default": "ByteDance/Sa2VA-Qwen3-VL-4B"},
                 ),
-                "images": ("IMAGE",),
+                "images": (
+                    "IMAGE",
+                    {
+                        "tooltip": "Batch of images or video frames to segment. Should be in RGB format."
+                    },
+                ),
                 "segmentation_prompt": (
                     "STRING",
                     {
                         "default": "Please provide segmentation masks for the objects in this video.",
                         "multiline": True,
+                        "tooltip": "Text prompt describing what objects to segment across all frames. "
+                        "Be specific for consistent results across frames.",
                     },
                 ),
                 "threshold": (
@@ -690,18 +875,91 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
+                        "tooltip": "Threshold for converting probability masks to binary masks. "
+                        "Higher values create stricter masks. Default is higher than image mode for video consistency.",
                     },
                 ),
-                "use_8bit": ("BOOLEAN", {"default": False}),
-                "use_flash_attn": ("BOOLEAN", {"default": True}),
-                "unload": ("BOOLEAN", {"default": True}),
+                "use_8bit": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Use 8-bit quantization to reduce memory usage (requires bitsandbytes).",
+                    },
+                ),
+                "use_flash_attn": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Use flash attention for faster processing (requires flash-attn).",
+                    },
+                ),
+                "unload": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Unload model from memory after processing to free VRAM.",
+                    },
+                ),
+                "morph": (
+                    ["none", "opening", "closing", "erode", "dilate"],
+                    {
+                        "default": "none",
+                        "tooltip": "Morphological operation:\n"
+                        "• Opening: Erode then Dilate (removes noise)\n"
+                        "• Closing: Dilate then Erode (fills holes)\n"
+                        "• Erode: Shrink mask edges\n"
+                        "• Dilate: Expand mask edges\n"
+                        "• None: No operation",
+                    },
+                ),
+                "erode_kernel": (
+                    "INT",
+                    {
+                        "default": 3,
+                        "min": 1,
+                        "max": 50,
+                        "step": 2,
+                        "tooltip": "Size of erosion kernel (odd numbers: 1, 3, 5...). "
+                        "Used in both opening and closing operations.",
+                    },
+                ),
+                "dilate_kernel": (
+                    "INT",
+                    {
+                        "default": 3,
+                        "min": 1,
+                        "max": 50,
+                        "step": 2,
+                        "tooltip": "Size of dilation kernel (odd numbers: 1, 3, 5...). "
+                        "Used in both opening and closing operations.",
+                    },
+                ),
+                "iterations": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 10,
+                        "step": 1,
+                        "tooltip": "Number of iterations. Higher values create stronger effects.",
+                    },
+                ),
             }
         }
 
     RETURN_TYPES = ("STRING", "MASK")
     RETURN_NAMES = ("text_output", "masks")
+    OUTPUT_TOOLTIPS = (
+        "Text output from the model",
+        "Generated segmentation masks for all frames",
+    )
     FUNCTION = "segment_video"
     CATEGORY = "Sa2VA"
+    DESCRIPTION = (
+        "Sa2VA (Segment Anything 2 with Vision Assistant) for video/batch processing. "
+        "This node generates consistent segmentation masks across multiple frames or images using text prompts, "
+        "with optional morphological refinement for cleaner results. Ideal for video processing or batch image segmentation."
+    )
 
     def segment_video(
         self,
@@ -712,6 +970,10 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
         use_8bit,
         use_flash_attn,
         unload,
+        morph="none",
+        erode_kernel=3,
+        dilate_kernel=3,
+        iterations=1,
     ):
         """Process video frames with Sa2VA.
 
@@ -723,6 +985,10 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
             use_8bit: Use 8-bit quantization
             use_flash_attn: Use flash attention
             unload: Unload model after inference
+            morph: Morphological operation ("none", "opening", "closing", "erode", "dilate")
+            erode_kernel: Size of erosion kernel (1-50, odd numbers)
+            dilate_kernel: Size of dilation kernel (1-50, odd numbers)
+            iterations: Number of iterations (1-10)
 
         Returns:
             Tuple of (text_output, masks)
@@ -767,7 +1033,16 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
 
         # Convert masks
         h, w = images.shape[1], images.shape[2]
-        comfyui_masks, _ = self._convert_masks_to_comfyui(masks, h, w, threshold)
+        comfyui_masks, _ = self._convert_masks_to_comfyui(
+            masks,
+            h,
+            w,
+            threshold,
+            morph,
+            erode_kernel,
+            dilate_kernel,
+            iterations,
+        )
 
         # Unload if requested
         if unload:
