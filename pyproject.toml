@@ -3,35 +3,35 @@ name = "sa2va-xj"
 description = "Simple implementation of [a/ByteDance Sa2VA](https://github.com/bytedance/Sa2VA) nodes for ComfyUI."
 version = "1.0.0"
 license = {file = "LICENSE"} 
-# classifiers = [
-#     # For OS-independent nodes (works on all operating systems)
-#     "Operating System :: OS Independent",
-#
-#     # OR for OS-specific nodes, specify the supported systems:
-#     "Operating System :: Microsoft :: Windows",  # Windows specific
-#     "Operating System :: POSIX :: Linux",  # Linux specific
-#     "Operating System :: MacOS",  # macOS specific
-#
-#     # GPU Accelerator support. Pick the ones that are supported by your extension.
-#     "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
-#     "Environment :: GPU :: AMD ROCm",       # AMD ROCm support
-#     "Environment :: GPU :: Intel Arc",      # Intel Arc support
-#     "Environment :: NPU :: Huawei Ascend",  # Huawei Ascend support
-#     "Environment :: GPU :: Apple Metal",    # Apple Metal support
-# ]
+classifiers = [
+    # For OS-independent nodes (works on all operating systems)
+    "Operating System :: OS Independent",
+    # GPU Accelerator support. Pick the ones that are supported by your extension.
+    "Environment :: GPU :: NVIDIA CUDA",    # NVIDIA CUDA support
+]
 
-dependencies = ["transformers>=4.57.0", "torch>=2.0.0", "qwen_vl_utils", "pillow", "numpy", "# Optional dependencies (install separately if needed):", "# bitsandbytes - for 8-bit quantization", "# flash-attn - for flash attention acceleration"]
+dependencies = [
+    "transformers>=4.57.0",
+    "torch>=2.0.0",
+    "qwen_vl_utils",
+    "pillow",
+    "numpy"
+]
+
+[project.optional-dependencies]
+quantization = ["bitsandbytes"]
+acceleration = ["flash-attn"]
+all = ["bitsandbytes", "flash-attn"]
 
 [project.urls]
 Repository = "https://github.com/alexjx/ComfyUI-Sa2VA-XJ"
 #  Used by Comfy Registry https://registry.comfy.org
-Documentation = "https://github.com/alexjx/ComfyUI-Sa2VA-XJ/wiki"
+Documentation = "https://github.com/alexjx/ComfyUI-Sa2VA-XJ"
 "Bug Tracker" = "https://github.com/alexjx/ComfyUI-Sa2VA-XJ/issues"
 
 [tool.comfy]
-PublisherId = ""
+PublisherId = "alexjx"
 DisplayName = "ComfyUI-Sa2VA-XJ"
 Icon = ""
 includes = [] 
 # "requires-comfyui" = ">=1.0.0"  # ComfyUI version compatibility
-
