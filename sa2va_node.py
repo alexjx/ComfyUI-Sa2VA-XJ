@@ -156,7 +156,7 @@ def predict_forward_with_raw_masks(
                     for pixel in extra_pixel_values
                 ]
             ).to(self.torch_dtype)
-            num_frames = min(5, len(video))
+            num_frames = len(video)  # Generate masks for ALL frames, not just first 5
         else:
             ori_image_size = image.size
             g_image = np.array(image)
@@ -548,15 +548,69 @@ class Sa2VABase:
                 if len(mask_np.shape) == 4:  # (B, C, H, W)
                     mask_np = mask_np[0, 0]
                 elif len(mask_np.shape) == 3:
-                    if mask_np.shape[0] == 1:  # (1, H, W)
+                    # Check if this is a video mask [N_frames, H, W]
+                    # Video masks: first dim is small (num frames), other dims are large (resolution)
+                    # We want to process each frame separately
+                    if mask_np.shape[0] < min(mask_np.shape[1], mask_np.shape[2]) / 2:
+                        # This is likely video format [N_frames, H, W]
+                        # Process each frame as a separate mask
+                        for frame_idx in range(mask_np.shape[0]):
+                            frame_mask = mask_np[
+                                frame_idx
+                            ]  # Extract single frame [H, W]
+
+                            # Handle NaN and inf
+                            if np.any(np.isnan(frame_mask)) or np.any(
+                                np.isinf(frame_mask)
+                            ):
+                                frame_mask = np.nan_to_num(
+                                    frame_mask, nan=0.0, posinf=1.0, neginf=0.0
+                                )
+
+                            # Normalize to 0-1
+                            mask_min, mask_max = frame_mask.min(), frame_mask.max()
+                            if mask_max > mask_min:
+                                frame_mask = (frame_mask - mask_min) / (
+                                    mask_max - mask_min
+                                )
+                            else:
+                                frame_mask = (
+                                    np.ones_like(frame_mask)
+                                    if mask_min > 0
+                                    else np.zeros_like(frame_mask)
+                                )
+
+                            # Apply morphological operation before threshold
+                            if morph != "none":
+                                frame_mask = self._apply_morphological_operation(
+                                    frame_mask,
+                                    morph,
+                                    erode_kernel,
+                                    dilate_kernel,
+                                    iterations,
+                                )
+
+                            # Apply threshold
+                            frame_mask = (frame_mask > threshold).astype(np.float32)
+
+                            # Add to output
+                            comfyui_mask = torch.from_numpy(frame_mask).float()
+                            comfyui_masks.append(comfyui_mask)
+
+                            # Convert to IMAGE format (RGB visualization)
+                            rgb_np = np.stack(
+                                [frame_mask, frame_mask, frame_mask], axis=-1
+                            )
+                            rgb_np = np.clip(rgb_np, 0.0, 1.0).astype(np.float32)
+                            image_tensors.append(torch.from_numpy(rgb_np))
+
+                        # Skip the normal processing for this mask since we handled all frames
+                        continue
+
+                    elif mask_np.shape[0] == 1:  # (1, H, W)
                         mask_np = mask_np[0]
                     elif mask_np.shape[2] == 1:  # (H, W, 1)
                         mask_np = mask_np[:, :, 0]
-                    elif (
-                        mask_np.shape[0] < mask_np.shape[1]
-                        and mask_np.shape[0] < mask_np.shape[2]
-                    ):
-                        mask_np = mask_np[0]
                     else:
                         mask_np = mask_np[:, :, 0]
 
@@ -871,7 +925,7 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
                 "threshold": (
                     "FLOAT",
                     {
-                        "default": 0.7,
+                        "default": 0.5,
                         "min": 0.0,
                         "max": 1.0,
                         "step": 0.05,
