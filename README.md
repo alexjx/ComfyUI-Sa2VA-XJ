@@ -10,10 +10,10 @@ Sa2VA (Segment Anything 2 Video Assistant) is a multimodal large language model 
 
 - ✅ **Two dedicated nodes**: Separate nodes for image and video processing
 - ✅ **Configurable mask threshold**: Control mask quality with raw sigmoid probabilities (0.0-1.0, step 0.05)
+- ✅ **Mask refinement operations**: Clean up masks with morphological operations (opening, closing, erode, dilate)
 - ✅ **8-bit quantization**: Save VRAM with proper vision component handling
 - ✅ **Flash attention**: Optional acceleration for faster inference
 - ✅ **Model unloading**: Free VRAM after inference (user-controllable)
-- ✅ **Fail-fast errors**: Clear error messages, no silent failures
 
 ## Installation
 
@@ -43,6 +43,11 @@ pip install bitsandbytes
 pip install flash-attn --no-build-isolation
 ```
 
+**For mask refinement (morphological operations):**
+```bash
+pip install opencv-python
+```
+
 ### 4. Restart ComfyUI
 
 ## Requirements
@@ -68,9 +73,13 @@ Process single images with Sa2VA.
 - `image`: Input image (IMAGE type)
 - `segmentation_prompt`: Description of what to segment (STRING)
 - `threshold`: Binary threshold for masks (FLOAT, 0.0-1.0, step 0.05, default: 0.5)
-- `use_8bit`: Enable 8-bit quantization (BOOLEAN, default: False)
+- `use_8bit`: Enable 8-bit quantization (BOOLEAN, default: True)
 - `use_flash_attn`: Enable flash attention (BOOLEAN, default: True)
 - `unload`: Unload model after inference (BOOLEAN, default: True)
+- `morph`: Morphological operation (none/opening/closing/erode/dilate, default: none)
+- `erode_kernel`: Erosion kernel size (INT, 1-50, odd numbers, default: 3)
+- `dilate_kernel`: Dilation kernel size (INT, 1-50, odd numbers, default: 3)
+- `iterations`: Number of operation iterations (INT, 1-10, default: 1)
 
 **Outputs:**
 - `text_output`: Generated text description (STRING)
@@ -92,9 +101,13 @@ Process video frames or image batches with Sa2VA.
 - `images`: Input frames (IMAGE type, batch)
 - `segmentation_prompt`: Description of what to segment (STRING)
 - `threshold`: Binary threshold for masks (FLOAT, 0.0-1.0, step 0.05, default: 0.7)
-- `use_8bit`: Enable 8-bit quantization (BOOLEAN, default: False)
+- `use_8bit`: Enable 8-bit quantization (BOOLEAN, default: True)
 - `use_flash_attn`: Enable flash attention (BOOLEAN, default: True)
 - `unload`: Unload model after inference (BOOLEAN, default: True)
+- `morph`: Morphological operation (none/opening/closing/erode/dilate, default: none)
+- `erode_kernel`: Erosion kernel size (INT, 1-50, odd numbers, default: 3)
+- `dilate_kernel`: Dilation kernel size (INT, 1-50, odd numbers, default: 3)
+- `iterations`: Number of operation iterations (INT, 1-10, default: 1)
 
 **Outputs:**
 - `text_output`: Generated video description (STRING)
@@ -123,7 +136,7 @@ Process video frames or image batches with Sa2VA.
 ## Usage Tips
 
 ### Save VRAM
-1. Enable **use_8bit** (saves ~40% VRAM)
+1. Enable **use_8bit** (saves ~40% VRAM, now default)
 2. Use **smaller models** (2B-4B)
 3. Keep **unload = True** (default)
 4. Disable **use_flash_attn** if not installed
@@ -133,13 +146,30 @@ Process video frames or image batches with Sa2VA.
 2. Use **descriptive text**: Sa2VA handles long prompts well
 3. Adjust **threshold**:
    - Lower (0.3-0.4): More inclusive masks, captures low-confidence regions
-   - Default (0.5): Balanced segmentation
+   - Default (0.5 for images, 0.7 for video): Balanced segmentation
    - Higher (0.6-0.7): Stricter masks, only high-confidence regions
 4. Use **larger models**: 7B-14B for complex scenes
+5. **Refine masks** with morphological operations:
+   - **Opening**: Remove small noise and artifacts
+   - **Closing**: Fill small holes in masks
+   - **Erode**: Shrink mask boundaries
+   - **Dilate**: Expand mask boundaries
+
+### Mask Refinement Guide
+- **Opening** (Erode → Dilate): Best for removing noise while preserving main object
+  - Small kernels (3-5): Light cleanup
+  - Large kernels (7-15): Aggressive noise removal
+- **Closing** (Dilate → Erode): Best for filling holes and gaps
+  - Small kernels (3-5): Fill small gaps
+  - Large kernels (7-15): Connect separated regions
+- **Erode**: Shrink masks to reduce false positives
+- **Dilate**: Expand masks to capture edge details
+- **Iterations**: Higher values (2-5) create stronger effects
+- **Separate kernels**: Use different erode/dilate kernel sizes for asymmetric effects
 
 ### Speed Up Inference
 1. Enable **use_flash_attn** (requires flash-attn package)
-2. Enable **use_8bit** (slight quality trade-off)
+2. Enable **use_8bit** (slight quality trade-off, now default)
 3. Use **smaller models** (2B-4B)
 
 ## Troubleshooting
@@ -166,6 +196,12 @@ Or disable `use_8bit` in node settings.
 pip install flash-attn --no-build-isolation
 ```
 Or disable `use_flash_attn` in node settings (not required).
+
+### Morphological operations not working
+```bash
+pip install opencv-python
+```
+Operations will silently skip if opencv-python is not installed.
 
 ### "CUDA Out of Memory"
 1. Enable `use_8bit`
@@ -201,6 +237,13 @@ Or disable `use_flash_attn` in node settings (not required).
 2. Adjust `threshold` to 0.5-0.6 for balanced results
 3. Multiple masks will be output as batch
 
+### Mask Refinement
+1. Generate initial masks with appropriate threshold
+2. Use **Opening** to remove small noise artifacts
+3. Use **Closing** to fill holes in the main object
+4. Adjust kernel sizes (3-15) based on image resolution
+5. Increase iterations (2-5) for stronger effects
+
 ## Technical Details
 
 ### Mask Threshold Control
@@ -211,7 +254,19 @@ This implementation includes a **monkey-patched model** that returns raw sigmoid
 - **User control**: Your `threshold` parameter determines the binarization point
 - **Fine-grained adjustment**: 0.05 step size allows precise control over mask quality
 
-See `MASK_THRESHOLD_IMPLEMENTATION.md` for technical details on the implementation.
+### Morphological Operations
+
+The mask refinement system applies OpenCV morphological operations before thresholding:
+
+- **Processing order**: Raw sigmoid → Normalize → Morphological operation → Threshold → Binary mask
+- **Elliptical kernels**: Used for natural, circular structuring elements
+- **Separate kernel control**: Independent erosion and dilation kernel sizes for fine-tuned control
+- **Operation types**:
+  - **Opening**: Full erode+dilate cycle per iteration (removes noise)
+  - **Closing**: Full dilate+erode cycle per iteration (fills holes)
+  - **Erode**: Erosion only (shrinks masks)
+  - **Dilate**: Dilation only (expands masks)
+- **Optional dependency**: Requires opencv-python; operations skip gracefully if not installed
 
 ### Cache Location
 Models are cached in the global HuggingFace cache:
