@@ -254,6 +254,11 @@ def predict_forward_with_raw_masks(
         masks = masks.cpu().numpy()
         ret_masks.append(masks)
 
+    # Clean up large intermediate tensors
+    del g_pixel_values, sam_states, pred_masks
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
     return {"prediction": predict, "prediction_masks": ret_masks}
 
 
@@ -869,7 +874,12 @@ class XJSa2VAImageSegmentation(Sa2VABase):
 
         print(f"✓ Generated {len(masks)} mask(s)")
 
-        # Convert masks
+        # Unload model immediately if requested (before mask conversion)
+        if unload:
+            print("Unloading Sa2VA model before mask processing...")
+            self._unload_model()
+
+        # Convert masks (Sa2VA no longer in VRAM if unloaded)
         h, w = pil_image.size[1], pil_image.size[0]
         comfyui_masks, _ = self._convert_masks_to_comfyui(
             masks,
@@ -881,10 +891,6 @@ class XJSa2VAImageSegmentation(Sa2VABase):
             dilate_kernel,
             iterations,
         )
-
-        # Unload if requested
-        if unload:
-            self._unload_model()
 
         return (text, comfyui_masks)
 
@@ -1085,7 +1091,12 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
 
         print(f"✓ Generated {len(masks)} mask(s)")
 
-        # Convert masks
+        # Unload model immediately if requested (before mask conversion)
+        if unload:
+            print("Unloading Sa2VA model before mask processing...")
+            self._unload_model()
+
+        # Convert masks (Sa2VA no longer in VRAM if unloaded)
         h, w = images.shape[1], images.shape[2]
         comfyui_masks, _ = self._convert_masks_to_comfyui(
             masks,
@@ -1097,9 +1108,5 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
             dilate_kernel,
             iterations,
         )
-
-        # Unload if requested
-        if unload:
-            self._unload_model()
 
         return (text, comfyui_masks)
