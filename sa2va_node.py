@@ -4,12 +4,15 @@ Simple, clean implementation of Sa2VA segmentation nodes
 """
 
 import gc
+import logging
 from types import MethodType
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 # Check optional dependencies at module level
 try:
@@ -280,15 +283,15 @@ class Sa2VABase:
         """
         # Check if model is already loaded
         if self.model is not None and self.current_model == model_name:
-            print(f"✓ Model already loaded: {model_name}")
+            logger.info(f"Model already loaded: {model_name}")
             return
 
         # Unload old model if switching
         if self.model is not None:
-            print(f"Unloading previous model: {self.current_model}")
+            logger.info(f"Unloading previous model: {self.current_model}")
             self._unload_model()
 
-        print(f"Loading Sa2VA: {model_name}")
+        logger.info(f"Loading Sa2VA: {model_name}")
 
         # Build model configuration
         model_kwargs = {
@@ -316,7 +319,7 @@ class Sa2VABase:
                 llm_int8_enable_fp32_cpu_offload=True,
             )
             model_kwargs["quantization_config"] = quantization_config
-            print("  Using 8-bit quantization (skipping vision components)")
+            logger.info("Using 8-bit quantization (skipping vision components)")
         else:
             # Use bfloat16 if supported, else float16
             if torch.cuda.is_available():
@@ -330,15 +333,15 @@ class Sa2VABase:
             else:
                 dtype = torch.float32
             model_kwargs["torch_dtype"] = dtype
-            print(f"  Using dtype: {dtype}")
+            logger.info(f"Using dtype: {dtype}")
 
         # Configure flash attention
         if use_flash_attn:
             if HAS_FLASH_ATTN:
                 model_kwargs["use_flash_attn"] = True
-                print("  Flash attention: enabled")
+                logger.info("Flash attention: enabled")
             else:
-                print("  Flash attention: not available (continuing without it)")
+                logger.info("Flash attention: not available (continuing without it)")
 
         try:
             # Load model (uses global HuggingFace cache by default)
@@ -348,7 +351,7 @@ class Sa2VABase:
             if not use_8bit_quantization:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 self.model = self.model.to(device)
-                print(f"  Model on device: {device}")
+                logger.info(f"Model on device: {device}")
 
             # Load processor
             self.processor = AutoProcessor.from_pretrained(
@@ -359,12 +362,12 @@ class Sa2VABase:
             self.current_model = model_name
 
             # Monkey-patch the model's predict_forward method to support raw masks
-            print("  Patching model to support configurable mask threshold...")
+            logger.info("Patching model to support configurable mask threshold...")
             self.model.predict_forward = MethodType(
                 predict_forward_with_raw_masks, self.model
             )
 
-            print(f"✓ Model loaded successfully")
+            logger.info(f"Model loaded successfully")
 
         except Exception as e:
             self.model = None
@@ -393,7 +396,7 @@ class Sa2VABase:
         # Force garbage collection
         gc.collect()
 
-        print("✓ Model unloaded")
+        logger.info("Model unloaded")
 
     def _tensor_to_pil(self, tensor):
         """Convert ComfyUI image tensor to PIL Image.
@@ -502,7 +505,7 @@ class Sa2VABase:
             return result.astype(np.float32) / 255.0
 
         except Exception as e:
-            print(f"Warning: Error applying morphological operation: {e}")
+            logger.warning(f"Error applying morphological operation: {e}")
             return mask_np
 
     def _convert_masks_to_comfyui(
@@ -669,7 +672,7 @@ class Sa2VABase:
                 image_tensors.append(torch.from_numpy(rgb_np))
 
             except Exception as e:
-                print(f"Warning: Error processing mask: {e}")
+                logger.warning(f"Error processing mask: {e}")
                 continue
 
         # Handle empty results
@@ -683,7 +686,7 @@ class Sa2VABase:
             final_masks = torch.stack(comfyui_masks, dim=0).float()
             final_images = torch.stack(image_tensors, dim=0).float()
         except Exception as e:
-            print(f"Warning: Error stacking masks: {e}")
+            logger.warning(f"Error stacking masks: {e}")
             empty_mask = torch.zeros((1, height, width), dtype=torch.float32)
             empty_image = torch.zeros((1, height, width, 3), dtype=torch.float32)
             return empty_mask, empty_image
@@ -861,7 +864,7 @@ class XJSa2VAImageSegmentation(Sa2VABase):
         }
 
         # Inference
-        print("Processing image...")
+        logger.info("Processing image...")
         with torch.inference_mode():
             if torch.cuda.is_available():
                 with torch.cuda.amp.autocast():
@@ -872,11 +875,11 @@ class XJSa2VAImageSegmentation(Sa2VABase):
         text = output.get("prediction", "")
         masks = output.get("prediction_masks", [])
 
-        print(f"✓ Generated {len(masks)} mask(s)")
+        logger.info(f"Generated {len(masks)} mask(s)")
 
         # Unload model immediately if requested (before mask conversion)
         if unload:
-            print("Unloading Sa2VA model before mask processing...")
+            logger.info("Unloading Sa2VA model before mask processing...")
             self._unload_model()
 
         # Convert masks (Sa2VA no longer in VRAM if unloaded)
@@ -1063,7 +1066,7 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
         pil_frames = []
         batch_size = images.shape[0]
 
-        print(f"Processing {batch_size} frames...")
+        logger.info(f"Processing {batch_size} frames...")
         for i in range(batch_size):
             pil_frame = self._tensor_to_pil(images[i])
             pil_frames.append(pil_frame)
@@ -1089,11 +1092,11 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
         text = output.get("prediction", "")
         masks = output.get("prediction_masks", [])
 
-        print(f"✓ Generated {len(masks)} mask(s)")
+        logger.info(f"Generated {len(masks)} mask(s)")
 
         # Unload model immediately if requested (before mask conversion)
         if unload:
-            print("Unloading Sa2VA model before mask processing...")
+            logger.info("Unloading Sa2VA model before mask processing...")
             self._unload_model()
 
         # Convert masks (Sa2VA no longer in VRAM if unloaded)

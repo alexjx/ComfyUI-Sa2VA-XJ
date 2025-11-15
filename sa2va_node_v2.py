@@ -4,11 +4,14 @@ Image segmentation only - no morphological operations
 """
 
 import gc
+import logging
 import numpy as np
 import torch
 from PIL import Image
 
 from .sa2va_node import Sa2VABase
+
+logger = logging.getLogger(__name__)
 
 
 class XJSa2VAImageSegmentationV2(Sa2VABase):
@@ -208,7 +211,7 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
         }
 
         # Inference
-        print("Processing image...")
+        logger.info("Processing image...")
         with torch.inference_mode():
             if torch.cuda.is_available():
                 with torch.cuda.amp.autocast():
@@ -219,11 +222,11 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
         text = output.get("prediction", "")
         masks = output.get("prediction_masks", [])
 
-        print(f"✓ Generated {len(masks)} mask(s)")
+        logger.info(f"Generated {len(masks)} mask(s)")
 
         # Unload Sa2VA model immediately if requested (before VITMatte processing)
         if unload:
-            print("Unloading Sa2VA model before VITMatte processing...")
+            logger.info("Unloading Sa2VA model before VITMatte processing...")
             self._unload_model()
 
         # Convert masks WITH VITMatte processing (Sa2VA no longer in VRAM if unloaded)
@@ -282,7 +285,7 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
         vitmatte_processor = None
         if process_detail:
             if original_image_pil is None:
-                print("Warning: VITMatte enabled but no image provided. Falling back to threshold.")
+                logger.warning("VITMatte enabled but no image provided. Falling back to threshold.")
                 process_detail = False
             else:
                 try:
@@ -297,12 +300,12 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
                         max_megapixels=max_megapixels,
                         device=device,
                     )
-                    print("VITMatte post-processing enabled")
+                    logger.info("VITMatte post-processing enabled")
                 except ImportError as e:
-                    print(f"Warning: VITMatte not available: {e}. Install with: pip install transformers>=4.57.0")
+                    logger.warning(f"VITMatte not available: {e}. Install with: pip install transformers>=4.57.0")
                     process_detail = False
                 except Exception as e:
-                    print(f"Warning: Failed to initialize VITMatte: {e}")
+                    logger.warning(f"Failed to initialize VITMatte: {e}")
                     process_detail = False
 
         if not masks or len(masks) == 0:
@@ -355,7 +358,7 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
                                         frame_mask
                                     )
                                 except Exception as e:
-                                    print(f"Warning: VITMatte failed for frame {frame_idx}: {e}")
+                                    logger.warning(f"VITMatte failed for frame {frame_idx}: {e}")
 
                             # Apply threshold
                             frame_mask = (frame_mask > threshold).astype(np.float32)
@@ -398,13 +401,13 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
                 # === VITMatte Post-Processing ===
                 if process_detail and vitmatte_processor is not None:
                     try:
-                        print("Applying VITMatte post-processing...")
+                        logger.info("Applying VITMatte post-processing...")
                         mask_np = vitmatte_processor.process_mask(
                             original_image_pil,
                             mask_np
                         )
                     except Exception as e:
-                        print(f"Warning: VITMatte failed: {e}. Falling back to threshold.")
+                        logger.warning(f"VITMatte failed: {e}. Falling back to threshold.")
 
                 # Apply threshold
                 mask_np = (mask_np > threshold).astype(np.float32)
@@ -419,7 +422,7 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
                 image_tensors.append(torch.from_numpy(rgb_np))
 
             except Exception as e:
-                print(f"Warning: Error processing mask: {e}")
+                logger.warning(f"Error processing mask: {e}")
                 continue
 
         # Cleanup VITMatte model
@@ -437,7 +440,7 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
             final_masks = torch.stack(comfyui_masks, dim=0).float()
             final_images = torch.stack(image_tensors, dim=0).float()
         except Exception as e:
-            print(f"Warning: Error stacking masks: {e}")
+            logger.warning(f"Error stacking masks: {e}")
             empty_mask = torch.zeros((1, height, width), dtype=torch.float32)
             empty_image = torch.zeros((1, height, width, 3), dtype=torch.float32)
             return empty_mask, empty_image

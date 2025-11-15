@@ -4,6 +4,7 @@ Simple, focused implementation - VITMatte only
 """
 
 import gc
+import logging
 import math
 from typing import Optional
 
@@ -11,6 +12,8 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 
 class VITMattePostProcessor:
@@ -218,7 +221,7 @@ class VITMattePostProcessor:
         self.model.to(device)
         self.model.eval()
 
-        print(f"✓ VITMatte model loaded on {device}")
+        logger.info(f"VITMatte model loaded on {device}")
 
     def cleanup(self):
         """Unload model and free memory."""
