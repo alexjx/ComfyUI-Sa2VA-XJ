@@ -6,6 +6,7 @@ Simple, focused implementation - VITMatte only
 import gc
 import logging
 import math
+import os
 from typing import Optional
 
 import cv2
@@ -13,7 +14,52 @@ import numpy as np
 import torch
 from PIL import Image
 
+import folder_paths
+
 logger = logging.getLogger(__name__)
+
+
+def get_local_vitmatte_path(model_name):
+    """Check if VITMatte model exists in ComfyUI's models directory.
+
+    Args:
+        model_name: HuggingFace model identifier (e.g., "hustvl/vitmatte-small-composition-1k")
+
+    Returns:
+        Local path if model exists, otherwise original model_name for HuggingFace download
+    """
+    try:
+        # Get ComfyUI models directory
+        models_dir = folder_paths.models_dir
+        vitmatte_dir = os.path.join(models_dir, "vitmatte")
+
+        # Convert HuggingFace model name to local path
+        # "hustvl/vitmatte-small-composition-1k" -> "models/vitmatte/hustvl/vitmatte-small-composition-1k"
+        local_path = os.path.join(vitmatte_dir, model_name)
+
+        # Check if model exists locally (look for config.json as indicator)
+        config_file = os.path.join(local_path, "config.json")
+        if os.path.exists(config_file):
+            logger.info(f"Found local VITMatte model at: {local_path}")
+            return local_path
+
+        # Check alternative location without organization prefix
+        # Some users might download to "models/vitmatte/vitmatte-small-composition-1k" directly
+        if "/" in model_name:
+            model_name_short = model_name.split("/")[-1]
+            local_path_alt = os.path.join(vitmatte_dir, model_name_short)
+            config_file_alt = os.path.join(local_path_alt, "config.json")
+            if os.path.exists(config_file_alt):
+                logger.info(f"Found local VITMatte model at: {local_path_alt}")
+                return local_path_alt
+
+        # Model not found locally, will download from HuggingFace
+        logger.info(f"Local VITMatte model not found. Will download from HuggingFace: {model_name}")
+        return model_name
+
+    except Exception as e:
+        logger.warning(f"Error checking local VITMatte path: {e}. Using HuggingFace download.")
+        return model_name
 
 
 class VITMattePostProcessor:
@@ -209,12 +255,15 @@ class VITMattePostProcessor:
 
         model_name = "hustvl/vitmatte-small-composition-1k"
 
+        # Check for local model first, fallback to HuggingFace download
+        model_path = get_local_vitmatte_path(model_name)
+
         self.processor = VitMatteImageProcessor.from_pretrained(
-            model_name,
+            model_path,
         )
 
         self.model = VitMatteForImageMatting.from_pretrained(
-            model_name,
+            model_path,
         )
 
         device = torch.device(self.device if torch.cuda.is_available() else "cpu")

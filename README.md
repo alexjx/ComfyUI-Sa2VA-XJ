@@ -5,6 +5,7 @@ Simple implementation of [ByteDance Sa2VA](https://github.com/bytedance/Sa2VA) n
 ## Features
 
 - ✅ **Three nodes**: Image V1, Image V2, and Video processing
+- ✅ **ComfyUI-compliant model paths**: Manual download support, local model priority
 - ✅ **VITMatte post-processing (V2)**: AI-powered alpha matting
 - ✅ **Configurable mask threshold**: Control mask quality (0.0-1.0, step 0.05)
 - ✅ **Morphological operations (V1)**: Opening, closing, erode, dilate
@@ -29,6 +30,102 @@ pip install opencv-python              # For morphological operations
 ```
 
 Restart ComfyUI after installation.
+
+## Model Installation
+
+You can download models **manually** (recommended) or let the node auto-download from HuggingFace on first use.
+
+### Option 1: Manual Download (Recommended)
+
+Manual download gives you control over model locations, enables offline use, and avoids duplicate downloads.
+
+**Directory Structure:**
+```
+ComfyUI/models/
+├── sa2va/
+│   ├── ByteDance/
+│   │   ├── Sa2VA-Qwen3-VL-4B/
+│   │   ├── Sa2VA-InternVL3-2B/
+│   │   ├── Sa2VA-Qwen2_5-VL-3B/
+│   │   ├── Sa2VA-Qwen2_5-VL-7B/
+│   │   ├── Sa2VA-InternVL3-8B/
+│   │   └── Sa2VA-InternVL3-14B/
+│   └── (or without ByteDance/ prefix)
+└── vitmatte/
+    └── hustvl/
+        └── vitmatte-small-composition-1k/
+```
+
+**Method 1: Using huggingface-cli (Recommended)**
+
+```bash
+# Install HuggingFace CLI
+pip install -U huggingface_hub
+
+# Download Sa2VA model (example: Qwen3-VL-4B)
+huggingface-cli download ByteDance/Sa2VA-Qwen3-VL-4B \
+  --local-dir ComfyUI/models/sa2va/ByteDance/Sa2VA-Qwen3-VL-4B
+
+# Download VITMatte model (for V2 node)
+huggingface-cli download hustvl/vitmatte-small-composition-1k \
+  --local-dir ComfyUI/models/vitmatte/hustvl/vitmatte-small-composition-1k
+```
+
+**Method 2: Using git-lfs**
+
+```bash
+# Install git-lfs
+git lfs install
+
+# Download Sa2VA model
+cd ComfyUI/models/sa2va/ByteDance
+git clone https://huggingface.co/ByteDance/Sa2VA-Qwen3-VL-4B
+
+# Download VITMatte model
+cd ComfyUI/models/vitmatte/hustvl
+git clone https://huggingface.co/hustvl/vitmatte-small-composition-1k
+```
+
+**Alternative Directory Structure:**
+
+You can also download without the organization prefix:
+
+```bash
+# Download directly to model name folder
+huggingface-cli download ByteDance/Sa2VA-Qwen3-VL-4B \
+  --local-dir ComfyUI/models/sa2va/Sa2VA-Qwen3-VL-4B
+```
+
+Both structures are supported:
+- `models/sa2va/ByteDance/Sa2VA-Qwen3-VL-4B/` ✅
+- `models/sa2va/Sa2VA-Qwen3-VL-4B/` ✅
+
+### Option 2: Automatic Download
+
+Models will auto-download from HuggingFace to `~/.cache/huggingface/hub/` on first use if not found locally.
+
+**Note:** This may take time depending on your internet connection and will use HuggingFace's cache directory.
+
+### Model Sizes
+
+Plan your storage accordingly:
+
+| Model                         | Download Size | Disk Size (Installed) | VRAM (fp16) | VRAM (8-bit) |
+| ----------------------------- | ------------- | --------------------- | ----------- | ------------ |
+| **Sa2VA Models**              |
+| InternVL3-2B                  | ~4GB          | ~4.5GB                | ~6GB        | ~4GB         |
+| Qwen2_5-VL-3B                 | ~6GB          | ~6.5GB                | ~8GB        | ~5GB         |
+| **Qwen3-VL-4B** (default)     | **~8GB**      | **~9GB**              | **~10GB**   | **~6GB**     |
+| Qwen2_5-VL-7B                 | ~14GB         | ~15GB                 | ~16GB       | ~10GB        |
+| InternVL3-8B                  | ~16GB         | ~17GB                 | ~18GB       | ~11GB        |
+| InternVL3-14B                 | ~28GB         | ~30GB                 | ~30GB       | ~18GB        |
+| **VITMatte Model**            |
+| vitmatte-small-composition-1k | ~300MB        | ~350MB                | +2GB        | +2GB         |
+
+**Storage Tips:**
+- Start with **Qwen3-VL-4B** (default) - good balance of quality and speed
+- Use **8-bit quantization** to reduce VRAM usage
+- VITMatte is optional (V2 node only) for enhanced edge quality
 
 ## Requirements
 
@@ -102,14 +199,18 @@ Process video frames or image batches.
 
 ## Supported Models
 
-| Model | Parameters | VRAM (fp16) | VRAM (8-bit) |
-|-------|------------|-------------|--------------|
-| InternVL3-2B | 2B | ~6GB | ~4GB |
-| Qwen2_5-VL-3B | 3B | ~8GB | ~5GB |
-| **Qwen3-VL-4B** | 4B | ~10GB | ~6GB |
-| Qwen2_5-VL-7B | 7B | ~16GB | ~10GB |
-| InternVL3-8B | 8B | ~18GB | ~11GB |
-| InternVL3-14B | 14B | ~30GB | ~18GB |
+All models are from ByteDance's Sa2VA family:
+
+| Model           | Parameters | Notes                             |
+| --------------- | ---------- | --------------------------------- |
+| InternVL3-2B    | 2B         | Smallest, fastest                 |
+| Qwen2_5-VL-3B   | 3B         | Good for low VRAM                 |
+| **Qwen3-VL-4B** | 4B         | **Default - Best balance**        |
+| Qwen2_5-VL-7B   | 7B         | Higher quality                    |
+| InternVL3-8B    | 8B         | Advanced features                 |
+| InternVL3-14B   | 14B        | Best quality, requires 24GB+ VRAM |
+
+See [Model Installation](#model-installation) section for download instructions and VRAM requirements.
 
 ## Troubleshooting
 
@@ -123,16 +224,56 @@ pip install transformers>=4.57.0 --upgrade
 pip install qwen_vl_utils
 ```
 
+**Model Downloads**
+
+The node will log where it's loading models from:
+- `Found local Sa2VA model at: /path/to/model` - Using local model ✅
+- `Local model not found. Will download from HuggingFace: ...` - Auto-downloading from HF
+
+To verify model installation:
+```bash
+# Check if Sa2VA models exist
+ls -la ComfyUI/models/sa2va/
+
+# Check if VITMatte model exists
+ls -la ComfyUI/models/vitmatte/
+
+# Each model directory should contain config.json
+ls ComfyUI/models/sa2va/ByteDance/Sa2VA-Qwen3-VL-4B/config.json
+```
+
+**Slow First Load**
+- First run may download models from HuggingFace (can take 5-30 minutes)
+- Check console logs to see download progress
+- Consider manual download (see [Model Installation](#model-installation))
+
 **"CUDA Out of Memory"**
 - Enable `use_8bit`
 - Use smaller model (2B/4B)
 - Ensure `unload = True`
+- Lower VITMatte `max_megapixels` (V2 only)
 
 **"No masks generated"**
 - Try more specific prompts
 - Adjust `threshold` (try 0.3-0.7)
 
 ## Technical Details
+
+### Model Loading Behavior
+
+The nodes follow ComfyUI's standard model loading pattern:
+
+1. **Check local models first**: Looks in `ComfyUI/models/sa2va/` and `ComfyUI/models/vitmatte/`
+2. **Fallback to HuggingFace**: Auto-downloads to `~/.cache/huggingface/hub/` if not found locally
+3. **Supports both directory structures**:
+   - With org prefix: `models/sa2va/ByteDance/Sa2VA-Qwen3-VL-4B/`
+   - Without org prefix: `models/sa2va/Sa2VA-Qwen3-VL-4B/`
+
+**Benefits:**
+- ✅ Control over model storage locations
+- ✅ Offline use after manual download
+- ✅ No duplicate downloads
+- ✅ Backward compatible with auto-download
 
 ### Raw Mask Probabilities
 Sa2VA outputs raw sigmoid probabilities (0.0-1.0) instead of binary masks. The `threshold` parameter controls binarization.

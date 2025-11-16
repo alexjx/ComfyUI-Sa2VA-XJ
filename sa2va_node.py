@@ -5,12 +5,15 @@ Simple, clean implementation of Sa2VA segmentation nodes
 
 import gc
 import logging
+import os
 from types import MethodType
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+
+import folder_paths
 
 logger = logging.getLogger(__name__)
 
@@ -265,6 +268,49 @@ def predict_forward_with_raw_masks(
     return {"prediction": predict, "prediction_masks": ret_masks}
 
 
+def get_local_model_path(model_name):
+    """Check if model exists in ComfyUI's models directory.
+
+    Args:
+        model_name: HuggingFace model identifier (e.g., "ByteDance/Sa2VA-Qwen3-VL-4B")
+
+    Returns:
+        Local path if model exists, otherwise original model_name for HuggingFace download
+    """
+    try:
+        # Get ComfyUI models directory
+        models_dir = folder_paths.models_dir
+        sa2va_dir = os.path.join(models_dir, "sa2va")
+
+        # Convert HuggingFace model name to local path
+        # "ByteDance/Sa2VA-Qwen3-VL-4B" -> "models/sa2va/ByteDance/Sa2VA-Qwen3-VL-4B"
+        local_path = os.path.join(sa2va_dir, model_name)
+
+        # Check if model exists locally (look for config.json as indicator)
+        config_file = os.path.join(local_path, "config.json")
+        if os.path.exists(config_file):
+            logger.info(f"Found local Sa2VA model at: {local_path}")
+            return local_path
+
+        # Check alternative location without organization prefix
+        # Some users might download to "models/sa2va/Sa2VA-Qwen3-VL-4B" directly
+        if "/" in model_name:
+            model_name_short = model_name.split("/")[-1]
+            local_path_alt = os.path.join(sa2va_dir, model_name_short)
+            config_file_alt = os.path.join(local_path_alt, "config.json")
+            if os.path.exists(config_file_alt):
+                logger.info(f"Found local Sa2VA model at: {local_path_alt}")
+                return local_path_alt
+
+        # Model not found locally, will download from HuggingFace
+        logger.info(f"Local model not found. Will download from HuggingFace: {model_name}")
+        return model_name
+
+    except Exception as e:
+        logger.warning(f"Error checking local model path: {e}. Using HuggingFace download.")
+        return model_name
+
+
 class Sa2VABase:
     """Base class with shared functionality for Sa2VA nodes."""
 
@@ -344,8 +390,11 @@ class Sa2VABase:
                 logger.info("Flash attention: not available (continuing without it)")
 
         try:
-            # Load model (uses global HuggingFace cache by default)
-            self.model = AutoModel.from_pretrained(model_name, **model_kwargs).eval()
+            # Check for local model first, fallback to HuggingFace download
+            model_path = get_local_model_path(model_name)
+
+            # Load model from local path or HuggingFace
+            self.model = AutoModel.from_pretrained(model_path, **model_kwargs).eval()
 
             # Move to device if not using 8-bit quantization (8-bit handles device placement)
             if not use_8bit_quantization:
@@ -353,9 +402,9 @@ class Sa2VABase:
                 self.model = self.model.to(device)
                 logger.info(f"Model on device: {device}")
 
-            # Load processor
+            # Load processor (use same path as model)
             self.processor = AutoProcessor.from_pretrained(
-                model_name,
+                model_path,
                 trust_remote_code=True,
             )
 

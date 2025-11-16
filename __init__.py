@@ -1,8 +1,24 @@
 # ComfyUI-Sa2VA-RE - Refined Edition
 # Simplified Sa2VA nodes for ComfyUI
 
+import os
+import folder_paths
+
 from .sa2va_node import XJSa2VAImageSegmentation, XJSa2VAVideoSegmentation
 from .sa2va_node_v2 import XJSa2VAImageSegmentationV2
+
+# Register custom model directories for ComfyUI
+models_dir = folder_paths.models_dir
+
+# Register Sa2VA models directory
+sa2va_dir = os.path.join(models_dir, "sa2va")
+os.makedirs(sa2va_dir, exist_ok=True)
+folder_paths.add_model_folder_path("sa2va", sa2va_dir)
+
+# Register VITMatte models directory
+vitmatte_dir = os.path.join(models_dir, "vitmatte")
+os.makedirs(vitmatte_dir, exist_ok=True)
+folder_paths.add_model_folder_path("vitmatte", vitmatte_dir)
 
 NODE_CLASS_MAPPINGS = {
     "XJSa2VAImageSegmentation": XJSa2VAImageSegmentation,
