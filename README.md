@@ -1,5 +1,7 @@
 # ComfyUI-Sa2VA-XJ
 
+[中文文档](README_zh_cn.md) | English
+
 Simple implementation of [ByteDance Sa2VA](https://github.com/bytedance/Sa2VA) nodes for ComfyUI.
 
 ## Features
