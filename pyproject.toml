@@ -1,7 +1,7 @@
 [project]
 name = "sa2va-xj"
 description = "Simple implementation of [a/ByteDance Sa2VA](https://github.com/bytedance/Sa2VA) nodes for ComfyUI."
-version = "1.0.1"
+version = "1.0.2"
 license = {file = "LICENSE"} 
 classifiers = [
     # For OS-independent nodes (works on all operating systems)
