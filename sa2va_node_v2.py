@@ -200,15 +200,35 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
         # Convert to PIL
         pil_image = self._tensor_to_pil(image)
 
-        # Prepare input
-        input_dict = {
-            "image": pil_image,
-            "text": f"<image>{segmentation_prompt}",
-            "past_text": "",
-            "mask_prompts": None,
-            "processor": self.processor,
-            "return_raw_masks": True,  # Get raw sigmoid probabilities
-        }
+        # Prepare input - different signatures for patched vs original models
+        if self.is_patched:
+            # Patched Qwen3-VL-4B model accepts processor and return_raw_masks
+            input_dict = {
+                "image": pil_image,
+                "text": f"<image>{segmentation_prompt}",
+                "past_text": "",
+                "mask_prompts": None,
+                "processor": self.processor,
+                "return_raw_masks": True,  # Get raw sigmoid probabilities
+            }
+        else:
+            # Original models require tokenizer parameter (but not processor)
+            logger.info("Using model's default binarization (threshold=0.5)")
+            # Handle different processor types (Qwen3 vs Qwen2_5/InternVL)
+            # Qwen3: processor has .tokenizer attribute
+            # Qwen2_5/InternVL: processor IS the tokenizer
+            if hasattr(self.processor, 'tokenizer'):
+                tokenizer = self.processor.tokenizer
+            else:
+                tokenizer = self.processor
+
+            input_dict = {
+                "image": pil_image,
+                "text": f"<image>{segmentation_prompt}",
+                "past_text": "",
+                "mask_prompts": None,
+                "tokenizer": tokenizer,
+            }
 
         # Inference
         logger.info("Processing image...")

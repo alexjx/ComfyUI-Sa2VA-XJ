@@ -101,7 +101,15 @@ def predict_forward_with_raw_masks(
     # Call the original method implementation
     assert processor is not None
     self.processor = processor
-    self.seg_token_idx = self.processor.tokenizer.convert_tokens_to_ids("[SEG]")
+
+    # Handle different processor types (Qwen3 vs Qwen2_5/InternVL)
+    # Qwen3: processor has .tokenizer attribute
+    # Qwen2_5/InternVL: processor IS the tokenizer
+    if hasattr(self.processor, 'tokenizer'):
+        tokenizer = self.processor.tokenizer
+    else:
+        tokenizer = self.processor
+    self.seg_token_idx = tokenizer.convert_tokens_to_ids("[SEG]")
     text = text.replace("<image>", "")
 
     if image is None and video is None and "<image>" not in past_text:
@@ -318,6 +326,7 @@ class Sa2VABase:
         self.model = None
         self.processor = None
         self.current_model = None
+        self.is_patched = False  # Track if model was monkey-patched
 
     def load_model(self, model_name, use_8bit_quantization, use_flash_attn):
         """Load Sa2VA model with specified configuration.
@@ -411,10 +420,18 @@ class Sa2VABase:
             self.current_model = model_name
 
             # Monkey-patch the model's predict_forward method to support raw masks
-            logger.info("Patching model to support configurable mask threshold...")
-            self.model.predict_forward = MethodType(
-                predict_forward_with_raw_masks, self.model
-            )
+            # ONLY patch for ByteDance/Sa2VA-Qwen3-VL-4B as the patched function was
+            # specifically written for this model's forward implementation
+            if model_name == "ByteDance/Sa2VA-Qwen3-VL-4B":
+                logger.info("Patching Qwen3-VL-4B model to support configurable mask threshold...")
+                self.model.predict_forward = MethodType(
+                    predict_forward_with_raw_masks, self.model
+                )
+                self.is_patched = True
+            else:
+                logger.info(f"Model {model_name} using default predict_forward (no patching).")
+                logger.info("Threshold parameter will not work correctly. Using model's default binarization (threshold=0.5).")
+                self.is_patched = False
 
             logger.info(f"Model loaded successfully")
 
@@ -435,6 +452,7 @@ class Sa2VABase:
             self.processor = None
 
         self.current_model = None
+        self.is_patched = False
 
         # Clear GPU cache
         if torch.cuda.is_available():
@@ -752,6 +770,7 @@ class XJSa2VAImageSegmentation(Sa2VABase):
             "required": {
                 "model_name": (
                     [
+                        "kumuji/Sa2VA-i-1B",
                         "ByteDance/Sa2VA-Qwen3-VL-4B",
                         "ByteDance/Sa2VA-InternVL3-2B",
                         "ByteDance/Sa2VA-Qwen2_5-VL-3B",
@@ -902,15 +921,35 @@ class XJSa2VAImageSegmentation(Sa2VABase):
         # Convert to PIL
         pil_image = self._tensor_to_pil(image)
 
-        # Prepare input
-        input_dict = {
-            "image": pil_image,
-            "text": f"<image>{segmentation_prompt}",
-            "past_text": "",
-            "mask_prompts": None,
-            "processor": self.processor,
-            "return_raw_masks": True,  # Get raw sigmoid probabilities
-        }
+        # Prepare input - different signatures for patched vs original models
+        if self.is_patched:
+            # Patched Qwen3-VL-4B model accepts processor and return_raw_masks
+            input_dict = {
+                "image": pil_image,
+                "text": f"<image>{segmentation_prompt}",
+                "past_text": "",
+                "mask_prompts": None,
+                "processor": self.processor,
+                "return_raw_masks": True,  # Get raw sigmoid probabilities
+            }
+        else:
+            # Original models require tokenizer parameter (but not processor)
+            logger.info("Using model's default binarization (threshold=0.5)")
+            # Handle different processor types (Qwen3 vs Qwen2_5/InternVL)
+            # Qwen3: processor has .tokenizer attribute
+            # Qwen2_5/InternVL: processor IS the tokenizer
+            if hasattr(self.processor, 'tokenizer'):
+                tokenizer = self.processor.tokenizer
+            else:
+                tokenizer = self.processor
+
+            input_dict = {
+                "image": pil_image,
+                "text": f"<image>{segmentation_prompt}",
+                "past_text": "",
+                "mask_prompts": None,
+                "tokenizer": tokenizer,
+            }
 
         # Inference
         logger.info("Processing image...")
@@ -1120,15 +1159,35 @@ class XJSa2VAVideoSegmentation(Sa2VABase):
             pil_frame = self._tensor_to_pil(images[i])
             pil_frames.append(pil_frame)
 
-        # Prepare input for video mode
-        input_dict = {
-            "video": pil_frames,  # List of PIL images
-            "text": f"<image>{segmentation_prompt}",
-            "past_text": "",
-            "mask_prompts": None,
-            "processor": self.processor,
-            "return_raw_masks": True,  # Get raw sigmoid probabilities
-        }
+        # Prepare input - different signatures for patched vs original models
+        if self.is_patched:
+            # Patched Qwen3-VL-4B model accepts processor and return_raw_masks
+            input_dict = {
+                "video": pil_frames,  # List of PIL images
+                "text": f"<image>{segmentation_prompt}",
+                "past_text": "",
+                "mask_prompts": None,
+                "processor": self.processor,
+                "return_raw_masks": True,  # Get raw sigmoid probabilities
+            }
+        else:
+            # Original models require tokenizer parameter (but not processor)
+            logger.info("Using model's default binarization (threshold=0.5)")
+            # Handle different processor types (Qwen3 vs Qwen2_5/InternVL)
+            # Qwen3: processor has .tokenizer attribute
+            # Qwen2_5/InternVL: processor IS the tokenizer
+            if hasattr(self.processor, 'tokenizer'):
+                tokenizer = self.processor.tokenizer
+            else:
+                tokenizer = self.processor
+
+            input_dict = {
+                "video": pil_frames,  # List of PIL images
+                "text": f"<image>{segmentation_prompt}",
+                "past_text": "",
+                "mask_prompts": None,
+                "tokenizer": tokenizer,
+            }
 
         # Inference
         with torch.inference_mode():
