@@ -194,8 +194,9 @@ class XJSa2VAImageSegmentationV2(Sa2VABase):
         if image is None:
             raise ValueError("No image provided")
 
-        # Load model
-        self.load_model(model_name, use_8bit, use_flash_attn)
+        # Load model if not already loaded
+        if not hasattr(self, 'model') or self.model is None:
+            self.load_model(model_name, use_8bit, use_flash_attn)
 
         # Convert to PIL
         pil_image = self._tensor_to_pil(image)
